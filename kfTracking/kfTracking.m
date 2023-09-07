@@ -5,7 +5,8 @@ close all; clear; clc;
 addpath 'C:\Users\logan\Documents\Repos\GNSS_SDR-master\GNSS_SDR-master'
 load("extras96.mat"); % should set a variable called "extra_out"
 dataAdaptCoeff = 1; 
-channel_to_track = 8;
+channel_to_track = 8; % channel we want to track
+PRN = 13; % PRN in channel
 frame_starts = extra_out.sample_num; % contains byte start of each
                                      % subframe 
 settings = initSettings();
@@ -44,6 +45,11 @@ priors_1 = extra_out.extras_epoch.epoch1;
 x_hat = priors_1.state;
 
 %% measurement models 
+% get spreading code for specified sample rate, PRN, and time of travel
+% using get_x(rem_tot, PRN, Ts)
+% x comes from get_x function
+gen_local_replica_anon = @(P, x, tau, t, lambda, range, I, T, c, dtr, dtsv) ...
+    sqrt(2*P) * x .* cos(2*pi/lambda * (range - I + T + c*(dtr - dtsv)));
 
 % initials for position and signal quality
 c = 2.99792458e8;         % speed of light in m/s
@@ -136,45 +142,3 @@ for i = 1:sim_time
     r = norm(dr); % r_r is the 3D user position, r_sv is 3D space vehicle position from ephemeris
     %state_out = [state_out; I, T, b, v_r, r_r];
 end
-
-% Define the symbols
-% syms a epsilon R R_prime real
-% syms r_r [3 1]
-% syms v_r [3 1]
-% syms r_sv [3 1]
-% syms v_sv [3 1]
-
-% shared line of sight vector
-% dr = (r_r - r_sv);
-% r_los = (r_r - r_sv) / norm(dr);
-
-% % Define the terms for y_I and y_Q
-% h_lin_I = [R; a/c * R_prime * dot(r_los, v_r - v_sv); a * R_prime / c; a * R_prime / c; a * R_prime / c];
-% h_lin_Q = [0; 2*pi*a/lam * R * dot(r_los, v_r - v_sv); -2*pi*a/lam * R; 2*pi*a/lam * R; 2*pi*a/lam * R];
-% 
-% % Convert to functions
-% variables = [a, R, R_prime, r_r.', v_r.', r_sv.', v_sv.'];
-% h_func_I = matlabFunction(h_lin_I, 'Vars', variables);
-% h_func_Q = matlabFunction(h_lin_Q, 'Vars', variables);
-
-% r_los = @(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
-%     ([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]) / ...
-%     norm([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]);
-% 
-% h_func_I = @(a, R, R_prime, r_r1, r_r2, r_r3, v_r1, v_r2, v_r3, r_sv1, r_sv2, r_sv3, v_sv1, v_sv2, v_sv3) ...
-%     [R; a/c * R_prime * dot(r_los_anon(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3), [v_r1; v_r2; v_r3] - [v_sv1; v_sv2; v_sv3]); ...
-%     a * R_prime / c; a * R_prime / c; a * R_prime / c];
-% 
-% h_func_Q = @(a, R, R_prime, r_r1, r_r2, r_r3, v_r1, v_r2, v_r3, r_sv1, r_sv2, r_sv3, v_sv1, v_sv2, v_sv3) ...
-%     [0; 2*pi*a/lam * R * dot(r_los_anon(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3), [v_r1; v_r2; v_r3] - [v_sv1; v_sv2; v_sv3]); ...
-%     -2*pi*a/lam * R; 2*pi*a/lam * R; 2*pi*a/lam * R];
-% 
-% % define R and R' 
-% Tc = 1/1.023e6; % Define your Tc value here
-% 
-% % Define R(epsilon) 
-% R_func = @(epsilon) (abs(epsilon) < Tc) .* (1 - abs(epsilon)/Tc);
-% 
-% % Define R'(epsilon)
-% R_prime_func = @(epsilon) (epsilon < 0) .* 1.023e6 + ...
-%                           (epsilon > 0) .* -1.023e6;
