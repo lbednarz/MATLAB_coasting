@@ -149,31 +149,37 @@ sig_d = 5e-8 * sqrt(Ts); % Discrete clock drift noise variance
 b_c = 1e-8; % Initial receiver clock bias
 d_c = 2*sig_d; % Initial receiver clock drift
 
-% take state vector r_r, v_r, dtr, dtrdot, I, T, b 
-% r_eq = r_{k-1} + (v_eq + (r_dot_nominal_{k-1} - v_nominal_{k-1}))*Ts
-% v_eq = v_k = v_{k-1} + (-1*b + (v_dot_nominal_{k-1}-g_adj) - normrnd(0, sig_a))*Ts
+% take state vector r_r, v_r, dtr, dtrdot, I, T, b, P
+% r_{k} = r_{k-1} + (v_{k-1} + (r_dot_nominal_{k-1} - v_dot_nominal_{k-1}))*Ts
+% v_{k} = v_{k-1} + (-1*b + (v_dot_nominal_{k-1}-g_adj) - normrnd(0, sig_a))*Ts
 % dtr_{k} = dtr_{k-1} + Ts*dtr_dot_{k-1} + 0.5*normrnd(0, sig_d)*Ts^2
 % dtr_dot_{k} = dtr_dot_{k-1} + normrnd(0, sig_d)
-% I_{k} = I_{k-1} + (-1/tau_I * I + normrnd(0, sig_I))*Ts
-% T_{k} = T_{k-1} + (-1/tau_T * T + normrnd(0, sig_T))*Ts
+% I_{k} = I_{k-1} + (-1/tau_I * I_{k} + normrnd(0, sig_I))*Ts
+% T_{k} = T_{k-1} + (-1/tau_T * T_{k} + normrnd(0, sig_T))*Ts
 % b_{k} = b_{k-1} + (-1/tau_b * b_{k-1} + normrnd(0, sig_b))*Ts
+% P_{k} = P_{k-1} + normrnd(0, sig_p)*Ts
 
 % Assuming values for Ts, tau_I, tau_T, tau_b, and g_adj are provided:
 
-A = [1, Ts, 0, 0, 0, 0, 0;
-     0, 1, 0, 0, 0, 0, -Ts;
-     0, 0, 1, Ts, 0, 0, 0;
-     0, 0, 0, 1, 0, 0, 0;
-     0, 0, 0, 0, 1 - Ts/tau_I, 0, 0;
-     0, 0, 0, 0, 0, 1 - Ts/tau_T, 0;
-     0, 0, 0, 0, 0, 0, 1 - Ts/tau_b];
+A = [1, Ts, 0,  0,       0,        0,           0,    0;
+     0,  1, 0,  0,       0,        0,         -Ts,    0;
+     0,  0, 1, Ts,       0,        0,           0,    0;
+     0,  0, 0,  1,       0,        0,           0,    0;
+     0,  0, 0,  0,   1-Ts/tau_I,   0,           0,    0;
+     0,  0, 0,  0,       0,     1-Ts/tau_T,      0,    0;
+     0,  0, 0,  0,       0,        0,      1-Ts/tau_b, 0;
+     0,  0, 0,  0,       0,        0,           0,    1];
 
-B = [Ts, -Ts;
-     -g_adj * Ts, Ts;
-     0, 0;
-     0, 0;
-     0, 0;
-     0, 0;
-     0, 0];
 
-Q = diag([0, sig_a^2, 0.5^2 * sig_d^2 * Ts^2, sig_d^2, sig_I^2, sig_T^2, sig_b^2]);
+B = [Ts, -Ts, 0;
+     0, Ts, -Ts;
+     0, 0, 0;
+     0, 0, 0;
+     0, 0, 0;
+     0, 0, 0;
+     0, 0, 0;
+     0, 0, 0];
+
+G = diag([0, -Ts, 0.5*Ts^2, 1, Ts, Ts, Ts, Ts]);
+W = diag([sig_a^2, sig_d^2, sig_d^2, sig_I^2, sig_T^2, sig_b^2, sig_P^2]);
+Q = G * W * G';
