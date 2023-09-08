@@ -9,10 +9,8 @@ load("data\trackingResults96.mat")
 dataAdaptCoeff = 1; 
 channel_to_track = 8; % channel we want to track
 PRN = 13; % PRN in channel
-frame_starts = extra_out.sample_num; % contains byte start of each
-                                     % subframe - 5515
-% should be 220614790
-byte_frame_start = trackResults(channel_to_track).absoluteSample(frame_starts(1,channel_to_track));
+frame_starts = extra_out.sample_num; % flag for each subframe 
+byte_frame_start = trackResults(channel_to_track).absoluteSample(frame_starts(1,channel_to_track)); % should be 220614790
 settings = initSettings();
 
 % get RF file to track 
@@ -45,41 +43,75 @@ rawSignal = nb(1)*rawSignal;
 
 %% build priors 
 % initials for position and signal quality
-c = 2.99792458e8;         % speed of light in m/s
-L1 = 1575.42e6;           % L1 carrier frequency
-lam = c/L1;               % carrier wavelength
-Tc = 1/1.023e6;           % chip duration
+c = 2.99792458e8;           % speed of light in m/s
+L1 = 1575.42e6;             % L1 carrier frequency
+lam = c/L1;                 % carrier wavelength
+Tc = 1/1.023e6;             % chip duration
+Ts = settings.samplingFreq; % Hz sample rate
 
-priors_1 = extra_out.extras_epoch.epoch1;
 % intial estimates 
-%[x_hat, y_hat, z_hat, cdtr_hat] = priors_1.state; 
+% [x_hat, y_hat, z_hat, cdtr_hat] = priors_1.state; 
+priors_1 = extra_out.extras_epoch.epoch1;
 x_hat = priors_1.state;
+
+% nominal values for local replica
 range = norm(priors_1.satpos(:,channel_to_track)-x_hat(1:3));
 tau = priors_1.tot*1000; % travel time in ms 
-rem_tau = tau - floor(tau); % retrieve just the time into current period 
+rem_tau = tau - floor(tau); % retrieve just the time into current period
 epsilon = .5*Tc;
-dtr = x_hat(4)/c;
-dtsv = priors_1.dtsv(8);
-Tr = priors_1.tropo; % tropo from SDR is high and reports no covariance 
-Io = 0; % because T is so high, we will assert 0 tropo with some covariance
+dtsv = priors_1.dtsv(channel_to_track);
+
+% other params for kalman filter 
+% signal power 
+PdBHz = -130;      % Signal power dB/Hz
+P = 10^(PdBHz/10); % convert to watts? 
+sig_P = 5e-7;      % watts?  
+
+% Iono and tropo
+tau_I = 30*60;    % About a 30-minute time constant
+tau_T = 2*3600;   % About a 2-hour time constant
+sig_I = 2;        % Should be about between 1-5 meters
+sig_T = .5*sig_I; % Should be roughly 1/2 of Iono
+
+% Accelerometer with bias
+sig_a = 57e-6; % SD accelerometer noise m/s^1.5
+sig_b = 14e-6; % Continuous SD of accelerometer bias RW noise
+tau_b = 3600;  % Time constant of accelerometer bias RW
+
+% Clock TXCO
+sig_d = 5e-8 * sqrt(Ts); % Discrete clock drift noise variance
+
+% convert ECEF pos to LOS basis 
 R_EB = LOSRotationMatrix(x_hat(1:3), priors_1.satpos(:,channel_to_track));
+x_hat_LOS = R_EB*x_hat(1:3); % x_hat_LOS(1 and 2) are constant 
+
 % initial covairances
+% take state vector r_r, v_r, dtr, dtrdot, I, T, b, P
 P0 = priors_1.Q; % assumes states are [x, y, z, c*dtr]
 P0(1:3,1:3) = R_EB*P0(1:3,1:3); % rotate into body frame
-% conservatively grab 1D pos and clock uncertainty 
-P0 = [P0(2,2), P0(2,4); P0(4,2), P0(4,4)].*10;
-% fill out P0 to include tropo and iono
+Prdt = [P0(2,2), P0(2,4); P0(4,2), P0(4,4)].*100; % 1D pos and clock uncertainty
+Pv0 = 1; Pdtrdot0 = 5e-5; PT0 = 3^2; PI0 = 3^2; Pb0 = 14e-3^2; PP0 = 10^2; 
+P0 = diag([Prdt(1,1), Pv0, Prdt(2,2), Pdtrdot0, PI0, PT0, Pb0, PP0]);
+P0(1,3) = Prdt(1,2); P0(3,1) = Prdt(1,2);
 
-
+% initial states 
+r0 = x_hat_LOS(3);
+v0 = 0;
+dtr0 = x_hat(4)/c;   % Initial receiver clock bias
+dtrdot0 = 2*sig_d;   % Initial receiver clock drift
+I0 = 0;
+T0 = priors_1.tropo;
+b0 = 14e-6;          % Initial guess at bias
+a0 = sqrt(2*P);
 
 %% measurement models 
 % get spreading code for specified sample rate, PRN, and time of travel
 % using get_x(rem_tot, PRN, Ts)
 % x comes from get_x function
 % isCosine allows for making I and Q replicas from 1 function 
-gen_local_replica = @(x, t, lambda, range, I, T, c, dtr, dtsv, isCosine) ...
-    x .* (isCosine .* cos(2*pi/lambda * (range - I + T + c*(dtr - dtsv))) + ...
-    (1-isCosine) .* sin(2*pi/lambda * (range - I + T + c*(dtr - dtsv))));
+gen_local_replica = @(x, range, I, T, c, dtr, dtsv, isCosine) ...
+    x .* (isCosine .* cos(2*pi/lam * (range - I + T + c*(dtr - dtsv))) + ...
+    (1-isCosine) .* sin(2*pi/lam * (range - I + T + c*(dtr - dtsv))));
 
 % Define R(epsilon) 
 R_func = @(epsilon) (abs(epsilon) < Tc) .* (1 - abs(epsilon)/Tc);
@@ -88,67 +120,46 @@ R_func = @(epsilon) (abs(epsilon) < Tc) .* (1 - abs(epsilon)/Tc);
 R_prime_func = @(epsilon) (epsilon < 0) .* 1.023e6 + ...
                           (epsilon > 0) .* -1.023e6;
 
+% define function for nominal signal measurement 
+gen_nominal_signal = @(a, epsilon, range, I, T, c, dtr, dtsv, isCosine) ...
+    a * R_func(epsilon) .* (isCosine .* cos(2*pi/lambda * (range - I + T + c*(dtr - dtsv))) + ...
+    (1-isCosine) .* sin(2*pi/lambda * (range - I + T + c*(dtr - dtsv))));
+
 r_los = @(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
     ([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]) / ...
     norm([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]);
 
-h_func_I = @(a, epsilon, r_r1, r_r2, r_r3, v_r1, v_r2, v_r3, r_sv1, r_sv2, r_sv3, v_sv1, v_sv2, v_sv3) ...
+% here we are trying to enforce 1D, body frame movement along r_los 
+% this means dr_r2,r3 are zero, but a nominal range must be provided 
+% in the rotation matrix, r_r3 is along the los 
+h_func_I = @(a, epsilon, r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
     [R_func(epsilon), ... 
-    a/c * R_prime_func(epsilon) * dot(r_los(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3), [v_r1; v_r2; v_r3] - [v_sv1; v_sv2; v_sv3]), ...
+    -a/c * R_prime_func(epsilon) * (r_sv3 - r_r3)/norm([r_sv1;r_sv2;r_sv3]-[r_r1;r_r2;r_r3]), ...
     a * R_prime_func(epsilon) / c, ... 
     a * R_prime_func(epsilon) / c, ... 
     a * R_prime_func(epsilon) / c];
 
-h_func_Q = @(a, epsilon, r_r1, r_r2, r_r3, v_r1, v_r2, v_r3, r_sv1, r_sv2, r_sv3, v_sv1, v_sv2, v_sv3) ...
+h_func_Q = @(a, epsilon, r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
     [0, ... 
-    2*pi*a/lam * R_func(epsilon) * dot(r_los(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3), [v_r1; v_r2; v_r3] - [v_sv1; v_sv2; v_sv3]), ...
+    -2*pi*a/lam * R_func(epsilon) * (r_sv3 - r_r3)/norm([r_sv1;r_sv2;r_sv3]-[r_r1;r_r2;r_r3]), ...
     -2*pi*a/lam * R_func(epsilon), ... 
     2*pi*a/lam * R_func(epsilon), ... 
     2*pi*a/lam * R_func(epsilon)];
 
+% need to implement a CN0 estimator here  
+% currently, I will have to implement a prompt correlator to estimate the
+% signal power. The early and late correlators will be used to estimate the
+% noise power. The final scheme will be: 
+% P_s = norm([I_p; Q_p])
+% P_e = norm([I_e; Q_e])
+% P_l = norm([I_l;Q_l])
+% P_n = (P_e + P_l)/2
+% CN0dBHz = 10*log10(Ps/Pn)
+% CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
+% R = 1/CN0; % Variance of measurement noise
+% sig_y = sqrt(R); % SD of measurement noise
 
 %% dynamic models 
-
-% Initialization
-sim_time = 1;
-Ts = (10*1.023e6)^-1; % Hz sample rate
-
-% Initial values for position and signal quality
-c = 2.99792458e8; % Speed of light in m/s
-L1 = 1575.42e6; % L1 carrier frequency
-lam = c/L1; % Carrier wavelength
-CN0dBHz = -10; % Carrier to noise density ratio dBHz
-CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
-R = 1/CN0; % Variance of measurement noise
-sig_y = sqrt(R); % SD of measurement noise
-PdBHz = -130; % Signal power dB/Hz
-P = 10^(PdBHz/10);
-n = 1; % Initial noise
-r_r = 0; % On earth's surface ENU
-v_r = 1; % m/s
-r_sv = 22000e3; % Meters ENU
-dt_sv = 1e-3;
-sig_v = .1; % m/s
-
-% Iono and tropo
-tau_I = 30*60; % About a 30-minute time constant
-tau_T = 2*3600; % About a 2-hour time constant
-sig_I = 2; % Should be about between 1-5 meters
-sig_T = .5*sig_I; % Should be roughly 1/2 of Iono
-I = 1; % Meters
-T = .5; % Meters
-
-% Accelerometer with bias
-sig_a = 57e-6; % SD accelerometer noise m/s^1.5
-sig_b = 14e-6; % Continuous SD of accelerometer bias RW noise
-tau_b = 3600; % Time constant of accelerometer bias RW
-b = 14e-6; % Initial guess at bias
-
-% Clock TXCO
-sig_d = 5e-8 * sqrt(Ts); % Discrete clock drift noise variance
-b_c = 1e-8; % Initial receiver clock bias
-d_c = 2*sig_d; % Initial receiver clock drift
-
 % take state vector r_r, v_r, dtr, dtrdot, I, T, b, P
 % r_{k} = r_{k-1} + (v_{k-1} + (r_dot_nominal_{k-1} - v_dot_nominal_{k-1}))*Ts
 % v_{k} = v_{k-1} + (-1*b + (v_dot_nominal_{k-1}-g_adj) - normrnd(0, sig_a))*Ts
@@ -157,7 +168,7 @@ d_c = 2*sig_d; % Initial receiver clock drift
 % I_{k} = I_{k-1} + (-1/tau_I * I_{k} + normrnd(0, sig_I))*Ts
 % T_{k} = T_{k-1} + (-1/tau_T * T_{k} + normrnd(0, sig_T))*Ts
 % b_{k} = b_{k-1} + (-1/tau_b * b_{k-1} + normrnd(0, sig_b))*Ts
-% P_{k} = P_{k-1} + normrnd(0, sig_p)*Ts
+% P_{k} = P_{k-1} + normrnd(0, sig_P)*Ts
 
 % Assuming values for Ts, tau_I, tau_T, tau_b, and g_adj are provided:
 
