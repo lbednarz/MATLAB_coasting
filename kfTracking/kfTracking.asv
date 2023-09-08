@@ -72,6 +72,7 @@ sig_d = 5e-8 * sqrt(Ts); % Discrete clock drift noise variance
 % convert ECEF pos to LOS basis 
 R_EB = LOSRotationMatrix(x_hat(1:3), priors_1.satpos(:,channel_to_track));
 x_hat_LOS = R_EB*x_hat(1:3); % x_hat_LOS(1 and 2) are constant 
+sv_pos_LOS = R_EB*priors_1.satpos(:,channel_to_track); % SV pos in new coordinate frame
 
 % initial covairances
 % take state vector r_r, v_r, dtr, dtrdot, I, T, b, P
@@ -109,7 +110,7 @@ R_prime_func = @(epsilon) (epsilon < 0) .* 1.023e6 + ...
                           (epsilon > 0) .* -1.023e6;
 
 % define function for nominal signal measurement 
-gen_nominal_signal = @(a, epsilon, range, I, T, c, dtr, dtsv, isCosine) ...
+gen_nominal_signal = @(a, epsilon, range, I, T, dtr, dtsv, isCosine) ...
     a * R_func(epsilon) .* (isCosine .* cos(2*pi/lambda * (range - I + T + c*(dtr - dtsv))) + ...
     (1-isCosine) .* sin(2*pi/lambda * (range - I + T + c*(dtr - dtsv))));
 
@@ -223,21 +224,7 @@ rawSignal = rawSignal';
 % will be applicable for 20 code periods.
 rawSignal = nb(1)*rawSignal;
 
-% % nominal values for local replica
-% range = norm(priors_1.satpos(:,channel_to_track)-x_hat(1:3));
-% tau = priors_1.tot*1000; % travel time in ms 
-% rem_tau = tau - floor(tau); % retrieve just the time into current period
-% epsilon = .5*Tc;
-% dtsv = priors_1.dtsv(channel_to_track);
-% % initial states 
-% r0 = x_hat_LOS(3);
-% v0 = 0;
-% dtr0 = x_hat(4)/c;   % Initial receiver clock bias
-% dtrdot0 = 2*sig_d;   % Initial receiver clock drift
-% I0 = 0;
-% T0 = priors_1.tropo;
-% b0 = 14e-6;          % Initial guess at bias
-% a0 = sqrt(2*P);
+% set initial covariance
 Pk = P0;
 
 % for i = 1:sim_time*1000 - 1 % each i is 1 ms  
@@ -246,12 +233,18 @@ Pk = P0;
     early_code  = get_x(rem_tot-epsilon, PRN, Ts);
     late_code   = get_x(rem_tot+epsilon, PRN, Ts);
     prompt_code = get_x(rem_tot, PRN, Ts);
-    LR_early_I  = gen_local_replica(early_code, range, Ik, Tk, dtrk, dtsv, f_IF, 1);
-    LR_early_Q  = gen_local_replica(early_code, range, Ik, Tk, dtrk, dtsv, f_IF, 0);
-    LR_late_I   = gen_local_replica(late_code, range, Ik, Tk, dtrk, dtsv, f_IF, 1);
-    LR_late_Q   = gen_local_replica(late_code, range, Ik, Tk, dtrk, dtsv, f_IF, 0);
-    LR_prompt_I = gen_local_replica(prompt_code, range, Ik, Tk, dtrk, dtsv, f_IF, 1);
-    LR_prompt_Q = gen_local_replica(prompt_code, range, Ik, Tk, dtrk, dtsv, f_IF, 0);
+    LR_early_I  = gen_local_replica(early_code, range, Ik, Tk, dtrk, ...
+                                        dtsv, f_IF, 1);
+    LR_early_Q  = gen_local_replica(early_code, range, Ik, Tk, dtrk, ... 
+                                        dtsv, f_IF, 0);
+    LR_late_I   = gen_local_replica(late_code, range, Ik, Tk, dtrk, ...
+                                        dtsv, f_IF, 1);
+    LR_late_Q   = gen_local_replica(late_code, range, Ik, Tk, dtrk, ...
+                                        dtsv, f_IF, 0);
+    LR_prompt_I = gen_local_replica(prompt_code, range, Ik, Tk, dtrk, ...
+                                        dtsv, f_IF, 1);
+    LR_prompt_Q = gen_local_replica(prompt_code, range, Ik, Tk, dtrk, ...
+                                        dtsv, f_IF, 0);
 
     % correlate 
     I_E = sum(LR_early_I  .* rawSignal);
@@ -268,8 +261,40 @@ Pk = P0;
     Q_L_filt = filtfilt(lp_filter, Q_L);
     I_P_filt = filtfilt(lp_filter, I_P);
     Q_P_filt = filtfilt(lp_filter, Q_P);
+    
+    % concatenate into measurement 
+    y_filt   = [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
 
     % estimate measurement noise
-    CCN0_dBHz(Ip, Qp, Ie, Qe, Il, Ql);
+    CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt);
+    CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
+    R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
 
+    % build linearized observation matrix for Kalman filter
+    a = sqrt(2*P);
+    h_I_E = h_func_I(a, -1*epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+    h_Q_E = h_func_Q(a, -1*epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+    h_I_L = h_func_I(a, epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+    h_Q_L = h_func_Q(a, epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+
+    % concatenate into observation matrix 
+    h_star = [h_I_E;h_Q_E;h_I_L;h_Q_L];
+    hx_star = h_star * [a, ];
+
+    % get nominal measurement 
+    ynom_I_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
+                                    dtsv, 1);
+    ynom_Q_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
+                                    dtsv, 0);
+    ynom_I_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
+                                    dtsv, 1);
+    ynom_Q_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
+                                    dtsv, 0);
+
+    % concatenate into nominal measurement 
+    y_nom    = [ynom_I_E;ynom_Q_E;ynom_I_L;ynom_Q_L];
 
