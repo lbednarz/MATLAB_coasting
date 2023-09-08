@@ -7,8 +7,8 @@ addpath data
 load("data\extras97.mat"); % should set a variable called "extra_out"
 load("data\trackingResults96.mat")
 dataAdaptCoeff = 1; 
-channel_to_track = 8; % channel we want to track
-PRN = 13; % PRN in channel
+channel_to_track = 8;                % channel we want to track
+PRN = 13;                            % PRN in channel
 frame_starts = extra_out.sample_num; % flag for each subframe 
 byte_frame_start = trackResults(channel_to_track).absoluteSample(frame_starts(1,channel_to_track)); % should be 220614790
 settings = initSettings();
@@ -36,18 +36,19 @@ nb = extra_out.extra_nb{1,channel_to_track};
 nb(nb == 0) = -1; % encode NB into 1s and -1s 
 
 % raw signal w/o navbit
-rawSignal = nb(1)*rawSignal;
-
 % repeat for each measurement epoch. Next batch will get a new navbit that
 % will be applicable for 20 code periods.
+rawSignal = nb(1)*rawSignal;
 
 %% build priors 
 % initials for position and signal quality
-c = 2.99792458e8;           % speed of light in m/s
-L1 = 1575.42e6;             % L1 carrier frequency
-lam = c/L1;                 % carrier wavelength
-Tc = 1/1.023e6;             % chip duration
-Ts = settings.samplingFreq; % Hz sample rate
+c = 2.99792458e8;             % speed of light in m/s
+L1 = 1575.42e6;               % L1 carrier frequency
+lam = c/L1;                   % carrier wavelength
+Tc = 1/1.023e6;               % chip duration
+Ts = settings.samplingFreq/2; % Hz sample rate
+Tacc = 1e-3;                  % accumulation period (seconds) 
+f_IF = settings.IF;           % intermediate frequency (Hz)
 
 % intial estimates 
 % [x_hat, y_hat, z_hat, cdtr_hat] = priors_1.state; 
@@ -109,9 +110,9 @@ a0 = sqrt(2*P);
 % using get_x(rem_tot, PRN, Ts)
 % x comes from get_x function
 % isCosine allows for making I and Q replicas from 1 function 
-gen_local_replica = @(x, range, I, T, c, dtr, dtsv, isCosine) ...
-    x .* (isCosine .* cos(2*pi/lam * (range - I + T + c*(dtr - dtsv))) + ...
-    (1-isCosine) .* sin(2*pi/lam * (range - I + T + c*(dtr - dtsv))));
+gen_local_replica = @(x, range, I, T, c, dtr, dtsv, f_IF, isCosine) ...
+    x .* (isCosine .* cos(2*pi/lam * (range - I + T + c*(dtr - dtsv) + lam*f_IF*Tacc)) + ...
+    (1-isCosine) .* sin(2*pi/lam * (range - I + T + c*(dtr - dtsv) + lam*f_IF*Tacc)));
 
 % Define R(epsilon) 
 R_func = @(epsilon) (abs(epsilon) < Tc) .* (1 - abs(epsilon)/Tc);
@@ -124,10 +125,6 @@ R_prime_func = @(epsilon) (epsilon < 0) .* 1.023e6 + ...
 gen_nominal_signal = @(a, epsilon, range, I, T, c, dtr, dtsv, isCosine) ...
     a * R_func(epsilon) .* (isCosine .* cos(2*pi/lambda * (range - I + T + c*(dtr - dtsv))) + ...
     (1-isCosine) .* sin(2*pi/lambda * (range - I + T + c*(dtr - dtsv))));
-
-r_los = @(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
-    ([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]) / ...
-    norm([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]);
 
 % here we are trying to enforce 1D, body frame movement along r_los 
 % this means dr_r2,r3 are zero, but a nominal range must be provided 
@@ -146,22 +143,28 @@ h_func_Q = @(a, epsilon, r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
     2*pi*a/lam * R_func(epsilon), ... 
     2*pi*a/lam * R_func(epsilon)];
 
-% need to implement a CN0 estimator here  
-% currently, I will have to implement a prompt correlator to estimate the
-% signal power. The early and late correlators will be used to estimate the
-% noise power. The final scheme will be: 
-% P_s = norm([I_p; Q_p])
-% P_e = norm([I_e; Q_e])
-% P_l = norm([I_l;Q_l])
-% P_n = (P_e + P_l)/2
-% CN0dBHz = 10*log10(Ps/Pn)
-% CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
-% R = 1/CN0; % Variance of measurement noise
-% sig_y = sqrt(R); % SD of measurement noise
+% CN0 estimator - only thing using I_p for now
+CN0_dBHz = @(Ip, Qp, Ie, Qe, Il, Ql) ...
+    10 * log10((Ip^2 + Qp^2) / (0.5 * ((Ie^2 + Qe^2) + ...
+    (Il^2 + Ql^2)) - (Ip^2 + Qp^2))); 
+
+% low pass filter for after signal accumulation 
+fs = 10e6; % Sampling frequency, for example 10 MHz
+fpass = 2.5e6; % Passband frequency
+fstop = 3e6; % Stopband frequency
+atten_stopband = 60; % Attenuation in the stopband in dB
+% Apass = 1;     % Passband ripple (in dB) and add 'PassbandRipple', Apass,
+% if you want this later 
+
+% Design a low-pass FIR filter
+lp_filter = designfilt('lowpassfir', 'PassbandFrequency', fpass, ...
+                       'StopbandFrequency', fstop, 'StopbandAttenuation', atten_stopband, ...
+                       'SampleRate', fs, 'DesignMethod', 'kaiserwin');
+
 
 %% dynamic models 
 % take state vector r_r, v_r, dtr, dtrdot, I, T, b, P
-% r_{k} = r_{k-1} + (v_{k-1} + (r_dot_nominal_{k-1} - v_dot_nominal_{k-1}))*Ts
+% r_{k} = r_{k-1} + (v_{k-1} + (r_dot_nominal_{k-1} - v_nominal_{k-1}))*Ts
 % v_{k} = v_{k-1} + (-1*b + (v_dot_nominal_{k-1}-g_adj) - normrnd(0, sig_a))*Ts
 % dtr_{k} = dtr_{k-1} + Ts*dtr_dot_{k-1} + 0.5*normrnd(0, sig_d)*Ts^2
 % dtr_dot_{k} = dtr_dot_{k-1} + normrnd(0, sig_d)
@@ -181,16 +184,35 @@ A = [1, Ts, 0,  0,       0,        0,            0,    0;
      0,  0, 0,  0,       0,        0,      1-Ts/tau_b, 0;
      0,  0, 0,  0,       0,        0,            0,    1];
 
+% control inputs are r_dot_nominal, v_nominal, v_dot_nominal, and gadj 
+B = [Ts, -Ts,  0,   0;
+      0,   0, Ts, -Ts;
+      0,   0,  0,   0;
+      0,   0,  0,   0;
+      0,   0,  0,   0;
+      0,   0,  0,   0;
+      0,   0,  0,   0;
+      0,   0,  0,   0];
 
-B = [Ts, -Ts, 0;
-     0, Ts, -Ts;
-     0, 0, 0;
-     0, 0, 0;
-     0, 0, 0;
-     0, 0, 0;
-     0, 0, 0;
-     0, 0, 0];
-
-G = diag([0, -Ts, 0.5*Ts^2, 1, Ts, Ts, Ts, Ts]);
+G = diag([-Ts, 0.5*Ts^2, 1, Ts, Ts, Ts, Ts]);
+[~,m] = size(G);
+G = vertcat(zeros(1,m),G);
 W = diag([sig_a^2, sig_d^2, sig_d^2, sig_I^2, sig_T^2, sig_b^2, sig_P^2]);
 Q = G * W * G';
+
+% need to implement a CN0 estimator here  
+% currently, I will have to implement a prompt correlator to estimate the
+% signal power. The early and late correlators will be used to estimate the
+% noise power. The final scheme will be: 
+% P_s = norm([I_p; Q_p])^2
+% P_e = norm([I_e; Q_e])^2
+% P_l = norm([I_l;Q_l])^2
+% P_n = (P_e + P_l)/2
+% CN0dBHz = 10*log10(Ps/Pn)
+% CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
+% R = 1/CN0; % Variance of measurement noise
+% sig_y = sqrt(R); % SD of measurement noise
+% Anonymous function to compute CN0 in dBHz
+% r_los = @(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
+%     ([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]) / ...
+%     norm([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]);
