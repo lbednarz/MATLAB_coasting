@@ -103,38 +103,54 @@ gen_local_replica = @(x, range, I, T, dtr, dtsv, f_IF, isCosine) ...
     (1-isCosine) .* sin(2*pi/lam * (range - I + T + c*(dtr - dtsv) + lam*f_IF*Tacc)));
 
 % Define R(epsilon) 
-R_func = @(epsilon) (abs(epsilon) < Tc) .* (1 - abs(epsilon)/Tc);
+samples_per_chip = .5*settings.samplingFreq*1/settings.codeFreqBasis; 
+R_func = @(epsilon) (abs(epsilon) < Tc) * settings.codeLength * ...
+                        samples_per_chip * (1 - abs(epsilon)/Tc);
 
 % Define R'(epsilon)
-R_prime_func = @(epsilon) (epsilon < 0) .* 1.023e6 + ...
-                          (epsilon > 0) .* -1.023e6;
+R_prime_func = @(epsilon) (epsilon < 0) .* 1.023e6*samples_per_chip + ...
+                          (epsilon > 0) .* -1.023e6*samples_per_chip;
 
 % define function for nominal signal measurement 
 gen_nominal_signal = @(a, epsilon, range, I, T, dtr, dtsv, isCosine) ...
-    a * R_func(epsilon) .* (isCosine .* cos(2*pi/lambda * (range - I + T + c*(dtr - dtsv))) + ...
-    (1-isCosine) .* sin(2*pi/lambda * (range - I + T + c*(dtr - dtsv))));
+    a * R_func(epsilon) .* (isCosine .* cos(2*pi/lam * (range - I + T + c*(dtr - dtsv))) + ...
+    (1-isCosine) .* sin(2*pi/lam * (range - I + T + c*(dtr - dtsv))));
+
+% shorthand for the derivative of of the function args wrt r_r
+dr = @(r_term, sv_term, r_r, r_sv)...
+     -1*(sv_term - r_term)/norm(r_sv-r_r);
+
+% shorthand for the derivative of funtion wrt I, T, dtr 
+dterm = @(a, epsilon, dtheta, isCosine,It) ...
+         a/c*R_prime_func(epsilon)*(isCosine*cos(dtheta)+(1-isCosine)*(sin(dtheta))) ...
+            + It*2*pi*a/lam*R_func(epsilon)*(isCosine*sin(dtheta)+(1-isCosine)*(cos(dtheta)));
 
 % here we are trying to enforce 1D, body frame movement along r_los 
 % this means dr_r2,r3 are zero, but a nominal range must be provided 
 % in the rotation matrix, r_r3 is along the los 
-h_func_I = @(a, epsilon, r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
-    [R_func(epsilon), ... 
-    -a/c * R_prime_func(epsilon) * (r_sv3 - r_r3)/norm([r_sv1;r_sv2;r_sv3]-[r_r1;r_r2;r_r3]), ...
-    a * R_prime_func(epsilon) / c, ... 
-    a * R_prime_func(epsilon) / c, ... 
-    a * R_prime_func(epsilon) / c];
+% state vector order is [r_r, dtr, I, T, a];
+h_func_I = @(a, epsilon, r_r, r_sv, dtheta) ...
+    [-a/c * R_prime_func(epsilon) * ...
+        dr(r_r(3), r_sv(3), r_r, r_sv)*cos(dtheta) ...
+            - 2*pi*a/lam*R_func(epsilon)*sin(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
+     dterm(a, epsilon, dtheta, 1, -1), ...
+     dterm(a, epsilon, dtheta, 1,  1), ... 
+     dterm(a, epsilon, dtheta, 1,  1), ... 
+     R_func(epsilon)*cos(dtheta)];
 
-h_func_Q = @(a, epsilon, r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
-    [0, ... 
-    -2*pi*a/lam * R_func(epsilon) * (r_sv3 - r_r3)/norm([r_sv1;r_sv2;r_sv3]-[r_r1;r_r2;r_r3]), ...
-    -2*pi*a/lam * R_func(epsilon), ... 
-    2*pi*a/lam * R_func(epsilon), ... 
-    2*pi*a/lam * R_func(epsilon)];
+h_func_Q = @(a, epsilon, r_r, r_sv, dtheta) ...
+    [-a/c * R_prime_func(epsilon) * ...
+        dr(r_r(3), r_sv(3), r_r, r_sv)*sin(dtheta) ...
+            + 2*pi*a/lam*R_func(epsilon)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
+     dterm(a, epsilon, dtheta, 0, -1), ...
+     dterm(a, epsilon, dtheta, 0,  1), ... 
+     dterm(a, epsilon, dtheta, 0,  1), ... 
+     R_func(epsilon)*sin(dtheta)];
 
 % CN0 estimator - only thing using I_p for now
 CN0_dBHz = @(Ip, Qp, Ie, Qe, Il, Ql) ...
-    10 * log10((Ip^2 + Qp^2) / (0.5 * ((Ie^2 + Qe^2) + ...
-    (Il^2 + Ql^2)) - (Ip^2 + Qp^2))); 
+    10 * log10((Ip^2 + Qp^2) / (0.5 * (Ie^2 + Qe^2 + ...
+    Il^2 + Ql^2))); 
 
 % low pass filter for after signal accumulation 
 fs = 10e6; % Sampling frequency, for example 10 MHz
@@ -188,23 +204,6 @@ G = vertcat(zeros(1,m),G);
 W = diag([sig_a^2, sig_d^2, sig_d^2, sig_I^2, sig_T^2, sig_b^2, sig_P^2]);
 Q = G * W * G';
 
-% need to implement a CN0 estimator here  
-% currently, I will have to implement a prompt correlator to estimate the
-% signal power. The early and late correlators will be used to estimate the
-% noise power. The final scheme will be: 
-% P_s = norm([I_p; Q_p])^2
-% P_e = norm([I_e; Q_e])^2
-% P_l = norm([I_l;Q_l])^2
-% P_n = (P_e + P_l)/2
-% CN0dBHz = 10*log10(Ps/Pn)
-% CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
-% R = 1/CN0; % Variance of measurement noise
-% sig_y = sqrt(R); % SD of measurement noise
-% Anonymous function to compute CN0 in dBHz
-% r_los = @(r_r1, r_r2, r_r3, r_sv1, r_sv2, r_sv3) ...
-%     ([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]) / ...
-%     norm([r_r1; r_r2; r_r3] - [r_sv1; r_sv2; r_sv3]);
-
 %% Tracking loop
 
 % get navbits 
@@ -213,16 +212,21 @@ nb(nb == 0) = -1; % encode NB into 1s and -1s
 sim_time = 30; % simulation time (s)
 
 % get first block of raw data
-blksize = ceil((settings.codeLength-remCodePhase) / codePhaseStep);
+%blksize = ceil((settings.codeLength-remCodePhase) / codePhaseStep);
+blksize = settings.samplingFreq * 1e-3; % grab 1 ms of data 
 [rawSignal, samplesRead] = fread(fid, ...
     dataAdaptCoeff*blksize, settings.dataType);
 
-rawSignal = rawSignal'; 
+% grab I and Q components 
+rawSignal = rawSignal';
+rawSignal1=rawSignal(1:2:end);
+rawSignal2=rawSignal(2:2:end);
+rawSignal = rawSignal1 + 1i .* rawSignal2;  %transpose vector
 
 % raw signal w/o navbit
 % repeat for each measurement epoch. Next batch will get a new navbit that
 % will be applicable for 20 code periods.
-rawSignal = nb(1)*rawSignal;
+rawSignal = -1*nb(1)*rawSignal;
 
 % set initial covariance
 Pk = P0;
@@ -230,9 +234,9 @@ Pk = P0;
 % for i = 1:sim_time*1000 - 1 % each i is 1 ms  
     % TODO: may have to incorporate remainder of code/carrier phase
     % make correlators 
-    early_code  = get_x(rem_tot-epsilon, PRN, Ts);
-    late_code   = get_x(rem_tot+epsilon, PRN, Ts);
-    prompt_code = get_x(rem_tot, PRN, Ts);
+    early_code  = get_x(rem_tau-epsilon*1000, PRN, Ts);
+    late_code   = get_x(rem_tau+epsilon*1000, PRN, Ts);
+    prompt_code = get_x(rem_tau, PRN, Ts);
     LR_early_I  = gen_local_replica(early_code, range, Ik, Tk, dtrk, ...
                                         dtsv, f_IF, 1);
     LR_early_Q  = gen_local_replica(early_code, range, Ik, Tk, dtrk, ... 
@@ -246,58 +250,71 @@ Pk = P0;
     LR_prompt_Q = gen_local_replica(prompt_code, range, Ik, Tk, dtrk, ...
                                         dtsv, f_IF, 0);
 
-    % correlate 
-    I_E = sum(LR_early_I  .* rawSignal);
-    Q_E = sum(LR_early_Q  .* rawSignal);
-    I_L = sum(LR_late_I   .* rawSignal);
-    Q_L = sum(LR_late_Q   .* rawSignal);
-    I_P = sum(LR_prompt_I .* rawSignal);
-    Q_P = sum(LR_prompt_Q .* rawSignal);
+    % mix signals  
+    I_E = LR_early_I  .* real(rawSignal);
+    Q_E = LR_early_Q  .* imag(rawSignal);
+    I_L = LR_late_I   .* real(rawSignal);
+    Q_L = LR_late_Q   .* imag(rawSignal);
+    I_P = LR_prompt_I .* real(rawSignal);
+    Q_P = LR_prompt_Q .* imag(rawSignal);
     
     % low pass 
-    I_E_filt = filtfilt(lp_filter, I_E);
-    Q_E_filt = filtfilt(lp_filter, Q_E);
-    I_L_filt = filtfilt(lp_filter, I_L);
-    Q_L_filt = filtfilt(lp_filter, Q_L);
-    I_P_filt = filtfilt(lp_filter, I_P);
-    Q_P_filt = filtfilt(lp_filter, Q_P);
+    I_E_filt = filter(lp_filter, I_E);
+    Q_E_filt = filter(lp_filter, Q_E);
+    I_L_filt = filter(lp_filter, I_L);
+    Q_L_filt = filter(lp_filter, Q_L);
+    I_P_filt = filter(lp_filter, I_P);
+    Q_P_filt = filter(lp_filter, Q_P);
+
+    % correlate
+    I_E_filt = sum(I_E_filt);
+    Q_E_filt = sum(Q_E_filt);
+    I_L_filt = sum(I_L_filt);
+    Q_L_filt = sum(Q_L_filt);
+    I_P_filt = sum(I_P_filt);
+    Q_P_filt = sum(Q_P_filt);
     
     % concatenate into measurement 
     y_filt   = [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
 
-    % estimate measurement noise
-    CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt);
-    CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
-    R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
+%     % estimate measurement noise
+%     CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt);
+%     CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
+%     R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
+% 
+%     % build linearized observation matrix for Kalman filter
+%     a = sqrt(2*P);
+%     h_I_E = h_func_I(a, -1*epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+%                         sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+%     h_Q_E = h_func_Q(a, -1*epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+%                         sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+%     h_I_L = h_func_I(a, epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+%                         sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+%     h_Q_L = h_func_Q(a, epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
+%                         sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
+% 
+%     % concatenate into observation matrix 
+%     h_star_tmp = [h_I_E;h_Q_E;h_I_L;h_Q_L];
+%     hx_star = h_star_tmp * [rk, dtrk, Ik, Tk, a]';
+%     % measurement does not consist of v_r, dtrdot, or b
+%     % add zeros to accomodate this
+%     h_star = [h_star_tmp(:,1), zeros(4,1), h_star_tmp(:,2), zeros(4,1), ...
+%                 h_star_tmp(:,3:4), zeros(4,1), h_star_tmp(:,5)];
+% 
+%     % get nominal measurement 
+%     ynom_I_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
+%                                     dtsv, 1);
+%     ynom_Q_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
+%                                     dtsv, 0);
+%     ynom_I_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
+%                                     dtsv, 1);
+%     ynom_Q_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
+%                                     dtsv, 0);
+% 
+%     % concatenate into nominal measurement 
+%     y_nom    = [ynom_I_E;ynom_Q_E;ynom_I_L;ynom_Q_L];
+% 
+%     % form adjusted measurement 
+%     y_star = y_filt - y_nom + hx_star;
 
-    % build linearized observation matrix for Kalman filter
-    a = sqrt(2*P);
-    h_I_E = h_func_I(a, -1*epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
-                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
-    h_Q_E = h_func_Q(a, -1*epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
-                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
-    h_I_L = h_func_I(a, epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
-                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
-    h_Q_L = h_func_Q(a, epsilon, x_hat_LOS(1), x_hat_LOS(2), rk, ...
-                        sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3));
-
-    % concatenate into observation matrix 
-    h_star = [h_I_E;h_Q_E;h_I_L;h_Q_L];
-    hx_star = h_star * [a, rk, Ik, Tk, dtrk]';
-
-    % get nominal measurement 
-    ynom_I_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
-                                    dtsv, 1);
-    ynom_Q_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
-                                    dtsv, 0);
-    ynom_I_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
-                                    dtsv, 1);
-    ynom_Q_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
-                                    dtsv, 0);
-
-    % concatenate into nominal measurement 
-    y_nom    = [ynom_I_E;ynom_Q_E;ynom_I_L;ynom_Q_L];
-
-    % form adjusted measurement 
-    y_star = y_filt - y_nom + hx_star;
-
+    %a * R_func(epsilon) * (cos(2*pi/lam * (range - Ik + Tk + c*(dtrk - dtsv))));
