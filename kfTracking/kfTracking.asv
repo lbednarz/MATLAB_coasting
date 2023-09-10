@@ -94,14 +94,35 @@ bk = 14e-6;          % Initial guess at bias
 ak = sqrt(2*P);
 
 % rotate gravitational impact into body frame 
-R_ENU_to_ECEF = @(phi, lambda) ...
+% Given Latitude in DMS format
+lat_deg = 40;
+lat_min = 48;
+lat_sec = 33.2064;
+
+% Convert Latitude from DMS to Decimal Degrees
+lat_decimal = lat_deg + lat_min/60 + lat_sec/3600;
+
+% Given Longitude in DMS format
+lon_deg = 113; % Taking magnitude first, we'll apply the sign later
+lon_min = 36;
+lon_sec = 11.4036;
+
+% Convert Longitude from DMS to Decimal Degrees
+lon_decimal = -(lon_deg + lon_min/60 + lon_sec/3600); % Negative because it's west
+
+lat_radians = deg2rad(lat_decimal);
+lon_radians = deg2rad(lon_decimal);
+
+R_ENU_to_ECEF = @(phi, lambda) ... % phi=lat, lambda = lon
     [-sin(lambda),           -sin(phi)*cos(lambda),    cos(phi)*cos(lambda);
       cos(lambda),           -sin(phi)*sin(lambda),    cos(phi)*sin(lambda);
       0,                      cos(phi),                 sin(phi)];
-R_UE = R_ENU_to_ECEF(1,1);
+
+R_UE = R_ENU_to_ECEF(lat_radians,lon_radians);
 g_ENU = [0;0;-9.81];
 g_ECEF = R_UE*g_ENU;
 g_adj = R_EB*g_ECEF; 
+g_adj = g_adj(3); % grabbing part along LOS
 %% measurement models 
 % get spreading code for specified sample rate, PRN, and time of travel
 % using get_x(rem_tot, PRN, Ts)
@@ -187,14 +208,15 @@ lp_filter = designfilt('lowpassfir', 'PassbandFrequency', fpass, ...
 % P_{k} = P_{k-1} + normrnd(0, sig_P)*Ts
 
 % Assuming values for Ts, tau_I, tau_T, tau_b, and g_adj are provided:
+ts_dyn = 1/Ts;
 
-A = [1, Ts, 0,  0,       0,        0,            0,    0;
+A = [1, ts_dyn, 0,  0,       0,        0,            0,    0;
      0,  1, 0,  0,       0,        0,          -Ts,    0;
-     0,  0, 1, Ts,       0,        0,            0,    0;
+     0,  0, 1, ts_dyn,       0,        0,            0,    0;
      0,  0, 0,  1,       0,        0,            0,    0;
-     0,  0, 0,  0,   1-Ts/tau_I,   0,            0,    0;
-     0,  0, 0,  0,       0,     1-Ts/tau_T,      0,    0;
-     0,  0, 0,  0,       0,        0,      1-Ts/tau_b, 0;
+     0,  0, 0,  0,   1-ts_dyn/tau_I,   0,            0,    0;
+     0,  0, 0,  0,       0,     1-ts_dyn/tau_T,      0,    0;
+     0,  0, 0,  0,       0,        0,      1-ts_dyn/tau_b, 0;
      0,  0, 0,  0,       0,        0,            0,    1];
 
 % control inputs are r_dot_nominal, v_nominal, v_dot_nominal, and gadj 
@@ -216,7 +238,7 @@ Q = G * W * G';
 %% Tracking loop
 
 % get navbits 
-nb = extra_out.extra_nb{1,channel_to_track};
+nb = double(extra_out.extra_nb{1,channel_to_track});
 nb(nb == 0) = -1; % encode NB into 1s and -1s
 sim_time = 30; % simulation time (s)
 
@@ -235,13 +257,15 @@ rawSignal = rawSignal1 + 1i .* rawSignal2;  %transpose vector
 % raw signal w/o navbit
 % repeat for each measurement epoch. Next batch will get a new navbit that
 % will be applicable for 20 code periods.
-rawSignal = -1*nb(1)*rawSignal;
+nb_now = nb(1);
+rawSignal = nb_now*rawSignal;
 
 % set initial covariance and states
 Pk = P0;
-xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
+xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak]';
+counter = 1;
 
-% for i = 1:sim_time*1000 - 1 % each i is 1 ms  
+for i = 1:20 % each i is 1 ms  
     % TODO: may have to incorporate remainder of code/carrier phase
     % make correlators 
     early_code  = get_x(rem_tau-epsilon*1000, PRN, Ts);
@@ -255,9 +279,9 @@ xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
                                         dtsv, f_IF, 1);
     LR_late_Q   = gen_local_replica(late_code, range, xk(5), xk(6), xk(3), ...
                                         dtsv, f_IF, 0);
-    LR_prompt_I = gen_local_replica(prompt_code, range, Ik, Tk, dtrk, ...
+    LR_prompt_I = gen_local_replica(prompt_code, range, xk(5), xk(6), xk(3), ...
                                         dtsv, f_IF, 1);
-    LR_prompt_Q = gen_local_replica(prompt_code, range, Ik, Tk, dtrk, ...
+    LR_prompt_Q = gen_local_replica(prompt_code, range, xk(5), xk(6), xk(3), ...
                                         dtsv, f_IF, 0);
 
     % mix signals  
@@ -269,20 +293,20 @@ xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
     Q_P = LR_prompt_Q .* imag(rawSignal);
     
     % low pass 
-    I_E_filt = filter(lp_filter, I_E);
-    Q_E_filt = filter(lp_filter, Q_E);
-    I_L_filt = filter(lp_filter, I_L);
-    Q_L_filt = filter(lp_filter, Q_L);
-    I_P_filt = filter(lp_filter, I_P);
-    Q_P_filt = filter(lp_filter, Q_P);
+    I_E_bp = filter(lp_filter, I_E);
+    Q_E_bp = filter(lp_filter, Q_E);
+    I_L_bp = filter(lp_filter, I_L);
+    Q_L_bp = filter(lp_filter, Q_L);
+    I_P_bp = filter(lp_filter, I_P);
+    Q_P_bp = filter(lp_filter, Q_P);
 
     % correlate
-    I_E_filt = sum(I_E_filt);
-    Q_E_filt = sum(Q_E_filt);
-    I_L_filt = sum(I_L_filt);
-    Q_L_filt = sum(Q_L_filt);
-    I_P_filt = sum(I_P_filt);
-    Q_P_filt = sum(Q_P_filt);
+    I_E_filt = sum(I_E_bp);
+    Q_E_filt = sum(Q_E_bp);
+    I_L_filt = sum(I_L_bp);
+    Q_L_filt = sum(Q_L_bp);
+    I_P_filt = sum(I_P_bp);
+    Q_P_filt = sum(Q_P_bp);
     
     % concatenate into measurement 
     y_filt   = [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
@@ -293,7 +317,7 @@ xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
     R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
 
     % build linearized observation matrix for Kalman filter
-    a = sqrt(2*P);
+    a = xk(8);
     h_I_E = h_func_I(a, -1*epsilon, [x_hat_LOS(1), x_hat_LOS(2), rk]', ...
                         [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_E_filt,I_E_filt));
     h_Q_E = h_func_Q(a, -1*epsilon, [x_hat_LOS(1), x_hat_LOS(2), rk]', ...
@@ -314,13 +338,13 @@ xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
                 h_star_tmp(:,3:4), zeros(4,1), h_star_tmp(:,5)];
 
     % get nominal measurement 
-    ynom_I_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
+    ynom_I_E = gen_nominal_signal(a, -1*epsilon, range, xk(5), xk(6), xk(3), ...
                                     dtsv, 1);
-    ynom_Q_E = gen_nominal_signal(a, -1*epsilon, range, Ik, Tk, dtrk, ...
+    ynom_Q_E = gen_nominal_signal(a, -1*epsilon, range, xk(5), xk(6), xk(3), ...
                                     dtsv, 0);
-    ynom_I_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
+    ynom_I_L = gen_nominal_signal(a, epsilon, range, xk(5), xk(6), xk(3), ...
                                     dtsv, 1);
-    ynom_Q_L = gen_nominal_signal(a, epsilon, range, Ik, Tk, dtrk, ...
+    ynom_Q_L = gen_nominal_signal(a, epsilon, range, xk(5), xk(6), xk(3), ...
                                     dtsv, 0);
 
     % concatenate into nominal measurement 
@@ -332,7 +356,7 @@ xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
     dr_tmp = -1*(sv_pos_LOS(3) - rk)/norm([sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]- [x_hat_LOS(1), x_hat_LOS(2), rk]);
 
     % run measurement update
-    K = (h_star*Pk*h_star' + R) \ Pk*h_star';
+    K = Pk * h_star' / (h_star * Pk * h_star' + R);
     innov = y_star - h_star*xk;
     xhatk = xk + K*(innov);
     Phatk = (eye(size(Pk)) - K*h_star)*Pk;
@@ -344,4 +368,19 @@ xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
     Pk = A*Phatk*A' + Q; 
     x_hat_LOS(3) = xk(1);
     range = norm(sv_pos_LOS-x_hat_LOS); 
+
+    % get next data block 
+    [rawSignal, samplesRead] = fread(fid, ...
+    dataAdaptCoeff*blksize, settings.dataType);
+    % grab I and Q components 
+    if mod(i,20) == 0 || i == 1
+       counter = counter + 1;
+       nb_now = nb(counter);  
+    end 
+    rawSignal = nb_now*rawSignal';
+    rawSignal1=rawSignal(1:2:end);
+    rawSignal2=rawSignal(2:2:end);
+    rawSignal = rawSignal1 + 1i .* rawSignal2;  %transpose vector
+
+end
 

@@ -208,19 +208,19 @@ lp_filter = designfilt('lowpassfir', 'PassbandFrequency', fpass, ...
 % P_{k} = P_{k-1} + normrnd(0, sig_P)*Ts
 
 % Assuming values for Ts, tau_I, tau_T, tau_b, and g_adj are provided:
-
-A = [1, Ts, 0,  0,       0,        0,            0,    0;
-     0,  1, 0,  0,       0,        0,          -Ts,    0;
-     0,  0, 1, Ts,       0,        0,            0,    0;
+dt = 1/Ts; % time between samples 
+A = [1, dt, 0,  0,       0,        0,            0,    0;
+     0,  1, 0,  0,       0,        0,          -dt,    0;
+     0,  0, 1, dt,       0,        0,            0,    0;
      0,  0, 0,  1,       0,        0,            0,    0;
-     0,  0, 0,  0,   1-Ts/tau_I,   0,            0,    0;
-     0,  0, 0,  0,       0,     1-Ts/tau_T,      0,    0;
-     0,  0, 0,  0,       0,        0,      1-Ts/tau_b, 0;
+     0,  0, 0,  0,   1-dt/tau_I,   0,            0,    0;
+     0,  0, 0,  0,       0,     1-dt/tau_T,      0,    0;
+     0,  0, 0,  0,       0,        0,      1-dt/tau_b, 0;
      0,  0, 0,  0,       0,        0,            0,    1];
 
 % control inputs are r_dot_nominal, v_nominal, v_dot_nominal, and gadj 
-B = [Ts, -Ts,  0,   0;
-      0,   0, Ts, -Ts;
+B = [dt, -dt,  0,   0;
+      0,   0, dt, -dt;
       0,   0,  0,   0;
       0,   0,  0,   0;
       0,   0,  0,   0;
@@ -228,7 +228,7 @@ B = [Ts, -Ts,  0,   0;
       0,   0,  0,   0;
       0,   0,  0,   0];
 
-G = diag([-Ts, 0.5*Ts^2, 1, Ts, Ts, Ts, Ts]);
+G = diag([-dt, 0.5*dt^2, 1, dt, dt, dt, dt]);
 [~,m] = size(G);
 G = vertcat(zeros(1,m),G);
 W = diag([sig_a^2, sig_d^2, sig_d^2, sig_I^2, sig_T^2, sig_b^2, sig_P^2]);
@@ -237,7 +237,7 @@ Q = G * W * G';
 %% Tracking loop
 
 % get navbits 
-nb = extra_out.extra_nb{1,channel_to_track};
+nb = double(extra_out.extra_nb{1,channel_to_track});
 nb(nb == 0) = -1; % encode NB into 1s and -1s
 sim_time = 30; % simulation time (s)
 
@@ -256,13 +256,15 @@ rawSignal = rawSignal1 + 1i .* rawSignal2;  %transpose vector
 % raw signal w/o navbit
 % repeat for each measurement epoch. Next batch will get a new navbit that
 % will be applicable for 20 code periods.
-rawSignal = -1*nb(1)*rawSignal;
+nb_now = nb(1);
+rawSignal = nb_now*rawSignal;
 
 % set initial covariance and states
 Pk = P0;
 xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak]';
+counter = 1;
 
-for i = 1:sim_time*1000 - 1 % each i is 1 ms  
+for i = 1:20 % each i is 1 ms  
     % TODO: may have to incorporate remainder of code/carrier phase
     % make correlators 
     early_code  = get_x(rem_tau-epsilon*1000, PRN, Ts);
@@ -290,20 +292,20 @@ for i = 1:sim_time*1000 - 1 % each i is 1 ms
     Q_P = LR_prompt_Q .* imag(rawSignal);
     
     % low pass 
-    I_E_filt = filter(lp_filter, I_E);
-    Q_E_filt = filter(lp_filter, Q_E);
-    I_L_filt = filter(lp_filter, I_L);
-    Q_L_filt = filter(lp_filter, Q_L);
-    I_P_filt = filter(lp_filter, I_P);
-    Q_P_filt = filter(lp_filter, Q_P);
+    I_E_bp = filter(lp_filter, I_E);
+    Q_E_bp = filter(lp_filter, Q_E);
+    I_L_bp = filter(lp_filter, I_L);
+    Q_L_bp = filter(lp_filter, Q_L);
+    I_P_bp = filter(lp_filter, I_P);
+    Q_P_bp = filter(lp_filter, Q_P);
 
     % correlate
-    I_E_filt = sum(I_E_filt);
-    Q_E_filt = sum(Q_E_filt);
-    I_L_filt = sum(I_L_filt);
-    Q_L_filt = sum(Q_L_filt);
-    I_P_filt = sum(I_P_filt);
-    Q_P_filt = sum(Q_P_filt);
+    I_E_filt = sum(I_E_bp);
+    Q_E_filt = sum(Q_E_bp);
+    I_L_filt = sum(I_L_bp);
+    Q_L_filt = sum(Q_L_bp);
+    I_P_filt = sum(I_P_bp);
+    Q_P_filt = sum(Q_P_bp);
     
     % concatenate into measurement 
     y_filt   = [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
@@ -365,6 +367,19 @@ for i = 1:sim_time*1000 - 1 % each i is 1 ms
     Pk = A*Phatk*A' + Q; 
     x_hat_LOS(3) = xk(1);
     range = norm(sv_pos_LOS-x_hat_LOS); 
+
+    % get next data block 
+    [rawSignal, samplesRead] = fread(fid, ...
+    dataAdaptCoeff*blksize, settings.dataType);
+    % grab I and Q components 
+    if mod(i,20) == 0 || i == 1
+       counter = counter + 1;
+       nb_now = nb(counter);  
+    end 
+    rawSignal = nb_now*rawSignal';
+    rawSignal1=rawSignal(1:2:end);
+    rawSignal2=rawSignal(2:2:end);
+    rawSignal = rawSignal1 + 1i .* rawSignal2;  %transpose vector
 
 end
 
