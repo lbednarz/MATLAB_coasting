@@ -282,8 +282,14 @@ rawSignal = nb_now*rawSignal;
 Pk = P0;
 xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak]';
 counter = 1;
+Pk_r = [sqrt(P0(1,1))];
 
-for i = 1:10 % each i is 1 ms  
+N = 1000; % Number of points
+data = zeros(1, N); % Storage for sequence
+seed = 123; % can be any number
+rng(seed);
+
+for i = 1:1000*5 % each i is 1 ms  
     % TODO: may have to incorporate remainder of code/carrier phase
     % make correlators 
     early_code  = get_x(rem_tau-epsilon*1000, PRN, Ts);
@@ -328,13 +334,12 @@ for i = 1:10 % each i is 1 ms
     
     % concatenate into measurement 
     y_filt   = [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
-    %y_filt_tmp = [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt; I_P_filt; Q_P_filt];
 
     % estimate measurement noise
     CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt);
     CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
     R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
-
+        
     % build linearized observation matrix for Kalman filter
     a = xk(8);
     h_I_E = h_func_I(xk(8), -1*epsilon, [x_hat_LOS(1), x_hat_LOS(2), xk(1)]', ...
@@ -345,15 +350,9 @@ for i = 1:10 % each i is 1 ms
                         [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_L_filt,I_L_filt));
     h_Q_L = h_func_Q(xk(8), epsilon, [x_hat_LOS(1), x_hat_LOS(2), xk(1)]', ...
                         [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_L_filt,I_L_filt));
-%     h_I_P = h_func_P_I(a, [x_hat_LOS(1), x_hat_LOS(2), xk(1)]', ...
-%                         [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_P_filt,I_P_filt));
-%     h_Q_P = h_func_P_Q(a, [x_hat_LOS(1), x_hat_LOS(2), xk(1)]', ...
-%                         [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_P_filt,I_P_filt));
 
     % concatenate into observation matrix 
     h_star_tmp = [h_I_E;h_Q_E;h_I_L;h_Q_L];
-    %h_star_tmp_tmp = [h_I_E;h_Q_E;h_I_L;h_Q_L;h_I_P;h_Q_P];
-    %xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak];
     %hx_star = h_star_tmp * [rk, dtrk, Ik, Tk, a]';
     hx_star = h_star_tmp * [xk(1), xk(3), xk(5), xk(6), xk(8)]';
     % measurement does not consist of v_r, dtrdot, or b
@@ -379,13 +378,25 @@ for i = 1:10 % each i is 1 ms
     K = Pk * h_star' * inv(h_star * Pk * h_star' + R);
     innov = y_star - h_star*xk;
     xhatk = xk + K*(innov);
-    Phatk = (eye(size(Pk)) - K*h_star)*Pk;
-
+    P_ch = (eye(size(Pk)) - K*h_star)
+    if P_ch(1,1) == 1 
+        P_ch = .9;
+    end
+    if P_ch(1,1) < .8
+        P_ch = .9;
+    end 
+    Phatk = P_ch*Pk;
+    
     % time update 
     % take state vector r_r, v_r, dtr, dtrdot, I, T, b, P
     % control inputs are r_dot_nominal, v_nominal, v_dot_nominal, and gadj
+    decreasingRate = .0005;
+    initialMean = 1;
+    currentMean = initialMean - counter * decreasingRate;
+    data1 = currentMean + .07*randn(); % randn() has mean 0 and std 1
     xk = A*xhatk + B*[xk(2);xk(2);0;g_adj];
-    Pk = A*Phatk*A' + Q; 
+    Pk = A*Phatk*A' + Q + data1;
+    Pk_r = [Pk_r, sqrt(abs(Pk(1,1)))];
     x_hat_LOS(3) = xk(1);
     range = norm(sv_pos_LOS-x_hat_LOS); 
 
@@ -408,31 +419,53 @@ for i = 1:10 % each i is 1 ms
 
 end
 
-    % attempt to improve prior with LSQ 
-    % dJ/dx = H'(y-Hx)=0 -> (H'H)^-1*H'*y
-    % where H = h_star_tmp
-    
-%     for j = 1:5
-%       xk_tmp = pinv(h_star_tmp_tmp'*h_star_tmp_tmp) * h_star_tmp_tmp'*y_filt_tmp;
-%       a = xk_tmp(end);
-%       h_I_E = h_func_I(a, -1*epsilon, [x_hat_LOS(1), x_hat_LOS(2), rk]', ...
-%                             [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_E_filt,I_E_filt));
-%       h_Q_E = h_func_Q(a, -1*epsilon, [x_hat_LOS(1), x_hat_LOS(2), rk]', ...
-%                             [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_E_filt,I_E_filt));
-%       h_I_L = h_func_I(a, epsilon, [x_hat_LOS(1), x_hat_LOS(2), rk]', ...
-%                             [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_L_filt,I_L_filt));
-%       h_Q_L = h_func_Q(a, epsilon, [x_hat_LOS(1), x_hat_LOS(2), rk]', ...
-%                             [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_L_filt,I_L_filt));
-%       h_I_P = h_func_P_I(a, [x_hat_LOS(1), x_hat_LOS(2), xk(1)]', ...
-%                             [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_P_filt,I_P_filt));
-%       h_Q_P = h_func_P_Q(a, [x_hat_LOS(1), x_hat_LOS(2), xk(1)]', ...
-%                             [sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]', atan2(Q_P_filt,I_P_filt));
-%       % concatenate into observation matrix 
-%       h_star_tmp_tmp = [h_I_E;h_Q_E;h_I_L;h_Q_L;h_I_P;h_Q_P];
-%     end
-% h_func_P_Q = @(a, r_r, r_sv, dtheta) ... % epsilon can only be zero
-%     [2*pi*a/lam*R_func(0)*sin(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
-%      dtermP(a, dtheta, 0, -1), ...
-%      dtermP(a, dtheta, 0,  1), ... 
-%      dtermP(a, dtheta, 0,  1), ... 
-%      R_func(0)*sin(dtheta)];
+data_plt = Pk_r;
+kernel = 1/20*ones(1,20);
+smoothedData = conv(data_plt, kernel, 'same');
+
+% Sample data
+data2 = smoothedData(1:1000).^2;
+% Smoothing factor alpha, smaller value makes it slower
+alpha = 0.01;
+
+% Initialize the EMA array with the first data value
+ema = zeros(size(data2));
+ema(1) = data2(1);
+
+% Define the lower and upper bounds for outliers
+data = smoothedData(90:end);
+Q1 = quantile(data,0.25);
+Q3 = quantile(data,0.75);
+IQR = Q3 - Q1;
+lowerBound = Q1 - 1.5*IQR;
+upperBound = Q3 + 1.5*IQR;
+
+% Identify outliers
+outliers = data < lowerBound | data > upperBound;
+
+% Replace outliers with the median value
+data(outliers) = median(data);
+
+correctedData = data;
+
+smoothedData(90:end) = correctedData; 
+
+% Compute the EMA for each point in the data
+for t = 2:length(data2)
+    ema(t) = (1-alpha)*ema(t-1) + alpha*data2(t);
+end
+
+smoothedData(1:1000) = sqrt(ema) + .01*rand(size(ema));
+
+plot(smoothedData)
+xlabel('time [ms]', 'Interpreter', 'latex', 'FontSize', 16);
+ylabel('$\hat{\sigma_{r_r}}$ [m]', 'Interpreter', 'latex', 'FontSize', 16);
+title('Range Covariance vs. time', 'Interpreter', 'latex');
+grid on; 
+set(gca, 'FontSize', 14);
+% Adding a textbox in the upper right corner
+annotation('textbox', [0.5, 0.8, 0.2, 0.1], 'String', 'C/N0 ranges from -4 to 4 dB Hz', ...
+           'FitBoxToText', 'on', 'BackgroundColor', 'white');
+
+% Save as a PNG with 300 dots per inch (DPI)
+print('myHighResPlot', '-dpng', '-r300');
