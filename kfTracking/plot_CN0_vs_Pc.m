@@ -12,15 +12,15 @@ for i = 1:length(CN0dBHz_range)
     R = 1/CN0;
 
     [~,~,Pc] = kalman(sysc,Qc,R,[]);
-    Pc_pos = 2*pi*Pc + 1;
-    Pc(1,1) = lam*(1*sqrt(Pc(1,1))); 
+    Pc_pos = 2*pi*Pc + 50;
+    Pc(1,1) = lam*(1*sqrt(Pc_pos(1,1))); 
     Pc_plot(i) = Pc(1,1);
 end
 
     figure;
     subplot(1,1,1);
     plot(CN0dBHz_range, Pc_plot);
-    xlabel('Recieved CN0 (dBHz)', 'Interpreter', 'latex', 'FontSize', 16);
+    xlabel('Recieved $\frac{C}{N_{0}}$ (dBHz)', 'Interpreter', 'latex', 'FontSize', 16);
     ylabel('Position error (m)', 'Interpreter', 'latex', 'FontSize', 16);
     title('Position error vs. $\frac{C}{N_0}$', 'Interpreter', 'latex');
     grid on; 
