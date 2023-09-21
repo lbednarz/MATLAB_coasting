@@ -36,6 +36,7 @@ Tc = 1/1.023e6;               % chip duration
 Ts = settings.samplingFreq/2; % Hz sample rate
 Tacc = 1e-3;                  % accumulation period (seconds) 
 f_IF = settings.IF;           % intermediate frequency (Hz)
+num_samples = .5*settings.samplingFreq*1e-3;
 
 % intial estimates 
 % [x_hat, y_hat, z_hat, cdtr_hat] = priors_1.state; 
@@ -176,7 +177,7 @@ dtermP = @(a, dtheta, isCosine,It) ...
 % in the rotation matrix, r_r3 is along the los 
 % state vector order is [r_r, dtr, I, T, a];
 h_func_I = @(a, epsilon, r_r, r_sv, dtheta) ...
-    [a/c * R_prime_func(epsilon) * ...
+    1/num_samples*[a/c * R_prime_func(epsilon) * ...
         dr(r_r(3), r_sv(3), r_r, r_sv)*cos(dtheta) ...
             - 2*pi*a/lam*R_func(epsilon)*sin(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
      dterm(a, epsilon, dtheta, 1, -1), ...
@@ -185,7 +186,7 @@ h_func_I = @(a, epsilon, r_r, r_sv, dtheta) ...
      R_func(epsilon)*cos(dtheta)];
 
 h_func_Q = @(a, epsilon, r_r, r_sv, dtheta) ...
-    [a/c * R_prime_func(epsilon) * ...
+    1/num_samples*[a/c * R_prime_func(epsilon) * ...
         dr(r_r(3), r_sv(3), r_r, r_sv)*sin(dtheta) ...
             + 2*pi*a/lam*R_func(epsilon)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
      dterm(a, epsilon, dtheta, 0, -1), ...
@@ -194,7 +195,7 @@ h_func_Q = @(a, epsilon, r_r, r_sv, dtheta) ...
      R_func(epsilon)*sin(dtheta)];
 
 h_func_P_I = @(a, r_r, r_sv, dtheta) ... % epsilon can only be zero
-    [2*pi*a/lam*R_func(0)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
+    1/num_samples*[2*pi*a/lam*R_func(0)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
      dtermP(a, dtheta, 1, -1), ...
      dtermP(a, dtheta, 1,  1), ... 
      dtermP(a, dtheta, 1,  1), ... 
@@ -290,9 +291,9 @@ Pk_r = [sqrt(P0(1,1))];
 
 N = 1000; % Number of points
 data = zeros(1, N); % Storage for sequence
-cn0_l = [];
+cn0_list = [];
 range_l = [];
-num_samples = .5*settings.samplingFreq*1e-3;
+
 
 for i = 1:1000 % each i is 1 ms  
     % TODO: may have to incorporate remainder of code/carrier phase
@@ -341,10 +342,10 @@ for i = 1:1000 % each i is 1 ms
     y_filt   = 1/num_samples * [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
 
     % estimate measurement noise
-    CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt);
+    CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt) - 3;
     CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
     R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
-    cn0_l = [cn0_l, CN0dBHz];
+    cn0_list = [cn0_list, CN0dBHz];
 
     % build linearized observation matrix for Kalman filter
     a = xk(8);
@@ -434,3 +435,6 @@ annotation('textbox', [0.5, 0.8, 0.2, 0.1], 'String', 'C/N0 ranges from -4 to 4 
 
 % Save as a PNG with 300 dots per inch (DPI)
 print('myHighResPlot', '-dpng', '-r300');
+
+kenerl3= 1/10*ones(1,10);
+cn0_list(1000:end) = 2*conv(cn0_list(1000:end), kenerl3,'same'); 

@@ -138,15 +138,20 @@ gen_local_replica = @(x, range, I, T, dtr, dtsv, f_IF, isCosine) ...
 
 % Define R(epsilon) 
 %samples_per_chip = .5*settings.samplingFreq*1/settings.codeFreqBasis; 
-R_func = @(epsilon) (abs(epsilon) < Tc) * settings.codeLength * ...
-                        .5*settings.samplingFreq/settings.codeFreqBasis * (1 - abs(epsilon)/Tc);
+% R_func = @(epsilon) (abs(epsilon) < Tc) * settings.codeLength * ...
+%                         .5*settings.samplingFreq/settings.codeFreqBasis * (1 - abs(epsilon)/Tc);
+R_func = @(epsilon) (abs(epsilon) < Tc) * ...
+                         (1 - abs(epsilon)/Tc);
+
 
 % Define R'(epsilon)
 % samples per chip is calculated as
 % sample_rate/(sample_rate/chip_frequency) = (sample/s) / (chips/s) =
 % chip_frequency
-R_prime_func = @(epsilon) (epsilon < 0) .* (1 + 1/settings.codeLength) * settings.codeFreqBasis + ...
-                          (epsilon > 0) .* -1*(1 + 1/settings.codeLength) * settings.codeFreqBasis;
+% R_prime_func = @(epsilon) (epsilon < 0) .* (1 + 1/settings.codeLength) * settings.codeFreqBasis + ...
+%                           (epsilon > 0) .* -1*(1 + 1/settings.codeLength) * settings.codeFreqBasis;
+R_prime_func = @(epsilon) (epsilon < 0) .* 1/settings.codeFreqBasis + ...
+                          (epsilon > 0) .* -1/settings.codeFreqBasis;
 
 % define function for nominal signal measurement 
 %gen_nominal_signal = @(a, epsilon, range, I, T, dtr, dtsv, isCosine) ...
@@ -285,9 +290,11 @@ Pk_r = [sqrt(P0(1,1))];
 
 N = 1000; % Number of points
 data = zeros(1, N); % Storage for sequence
-cn0_l = [];
+cn0_list = [];
+range_l = [];
+num_samples = .5*settings.samplingFreq*1e-3;
 
-for i = 1:1000 % each i is 1 ms  
+for i = 1:1000*5 % each i is 1 ms  
     % TODO: may have to incorporate remainder of code/carrier phase
     % make correlators 
     early_code  = get_x(rem_tau-epsilon*1000, PRN, Ts);
@@ -331,13 +338,13 @@ for i = 1:1000 % each i is 1 ms
     Q_P_filt = sum(Q_P_bp);
     
     % concatenate into measurement 
-    y_filt   = [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
+    y_filt   = 1/num_samples * [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
 
     % estimate measurement noise
     CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt);
     CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
     R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
-    cn0_l = [cn0_l, CN0];
+    cn0_list = [cn0_list, CN0dBHz];
 
     % build linearized observation matrix for Kalman filter
     a = xk(8);
@@ -388,6 +395,7 @@ for i = 1:1000 % each i is 1 ms
     Pk_r = [Pk_r, sqrt(abs(Pk(1,1)))];
     x_hat_LOS(3) = xk(1);
     range = norm(sv_pos_LOS-x_hat_LOS); 
+    range_l = [range_l, range];
 
     % get next data block 
     [rawSignal, samplesRead] = fread(fid, ...
@@ -403,7 +411,8 @@ for i = 1:1000 % each i is 1 ms
     rawSignal = rawSignal1 + 1i .* rawSignal2;  %transpose vector
 
     % calc new time of travel 
-    tau = 1/c*(range + xk(5) + xk(6) + c*(dtrk-dtsv))*1000;
+    % tau = 1/c*(range + xk(5) + xk(6) + c*(dtrk-dtsv))*1000;
+    tau = 1/c*(range + xk(5) + xk(6) + c*(xk(3)-dtsv))*1000;
     rem_tau = tau - floor(tau);
 
 end
@@ -425,3 +434,6 @@ annotation('textbox', [0.5, 0.8, 0.2, 0.1], 'String', 'C/N0 ranges from -4 to 4 
 
 % Save as a PNG with 300 dots per inch (DPI)
 print('myHighResPlot', '-dpng', '-r300');
+
+kenerl3= 1/10*ones(1,10);
+cn0_list(1000:end) = 2*conv(cn0_list(1000:end), kenerl3,'same'); 
