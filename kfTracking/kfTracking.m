@@ -1,7 +1,7 @@
 %% load in prior infomation from PLL/DLL
 % for this demo, we are interested in channels 2,3,8,9
-close all; clear; clc; 
-addpath 'C:\Users\logan\Documents\Repos\GNSS_SDR-master\GNSS_SDR-master'
+close all; clear; clc; beep off;
+%addpath 'C:\Users\logan\Documents\Repos\GNSS_SDR-master\GNSS_SDR-master'
 addpath data
 
 load("data\extras97.mat"); % should set a variable called "extra_out"
@@ -11,7 +11,7 @@ channel_to_track = 8;                % channel we want to track
 PRN = 13;                            % PRN in channel
 frame_starts = extra_out.sample_num; % flag for each subframe 
 byte_frame_start = trackResults(channel_to_track).absoluteSample(frame_starts(1,channel_to_track)); % should be 220614790
-settings = initSettings();
+settings = set_settings();
 
 % get RF file to track 
 fileName = 'C:\Users\logan\Documents\Repos\GNSS_SDR-master\GPSStatic_BW8_gain65_10Msps__REAL.bin';
@@ -69,7 +69,7 @@ sig_b = 14e-6; % Continuous SD of accelerometer bias RW noise
 tau_b = 3600;  % Time constant of accelerometer bias RW
 
 % Clock TXCO
-sig_d = 5e-8 * sqrt(Ts); % Discrete clock drift noise variance
+sig_d = 5e-10 * sqrt(Ts); % Discrete clock drift noise variance
 
 % convert ECEF pos to LOS basis 
 R_EB = LOSRotationMatrix(x_hat(1:3), priors_1.satpos(:,channel_to_track))';
@@ -149,13 +149,10 @@ R_func = @(epsilon) (abs(epsilon) < Tc) * ...
 % samples per chip is calculated as
 % sample_rate/(sample_rate/chip_frequency) = (sample/s) / (chips/s) =
 % chip_frequency
-% R_prime_func = @(epsilon) (epsilon < 0) .* (1 + 1/settings.codeLength) * settings.codeFreqBasis + ...
-%                           (epsilon > 0) .* -1*(1 + 1/settings.codeLength) * settings.codeFreqBasis;
 R_prime_func = @(epsilon) (epsilon < 0) .* 1/settings.codeFreqBasis + ...
                           (epsilon > 0) .* -1/settings.codeFreqBasis;
 
 % define function for nominal signal measurement 
-%gen_nominal_signal = @(a, epsilon, range, I, T, dtr, dtsv, isCosine) ...
 gen_nominal_signal = @(a, epsilon, dtheta, isCosine) ...
     a * R_func(epsilon) .* (isCosine .* cos(dtheta) + ...
     (1-isCosine) .* sin(dtheta));
@@ -177,25 +174,25 @@ dtermP = @(a, dtheta, isCosine,It) ...
 % in the rotation matrix, r_r3 is along the los 
 % state vector order is [r_r, dtr, I, T, a];
 h_func_I = @(a, epsilon, r_r, r_sv, dtheta) ...
-    1/num_samples*[a/c * R_prime_func(epsilon) * ...
+    [a/c * R_prime_func(epsilon) * ...
         dr(r_r(3), r_sv(3), r_r, r_sv)*cos(dtheta) ...
-            - 2*pi*a/lam*R_func(epsilon)*sin(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
+            - 2*pi*a*R_func(epsilon)*sin(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
      dterm(a, epsilon, dtheta, 1, -1), ...
      dterm(a, epsilon, dtheta, 1,  1), ... 
      dterm(a, epsilon, dtheta, 1,  1), ... 
      R_func(epsilon)*cos(dtheta)];
 
 h_func_Q = @(a, epsilon, r_r, r_sv, dtheta) ...
-    1/num_samples*[a/c * R_prime_func(epsilon) * ...
+    [a/c * R_prime_func(epsilon) * ...
         dr(r_r(3), r_sv(3), r_r, r_sv)*sin(dtheta) ...
-            + 2*pi*a/lam*R_func(epsilon)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
+            + 2*pi*a*R_func(epsilon)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
      dterm(a, epsilon, dtheta, 0, -1), ...
      dterm(a, epsilon, dtheta, 0,  1), ... 
      dterm(a, epsilon, dtheta, 0,  1), ... 
      R_func(epsilon)*sin(dtheta)];
 
 h_func_P_I = @(a, r_r, r_sv, dtheta) ... % epsilon can only be zero
-    1/num_samples*[2*pi*a/lam*R_func(0)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
+    [2*pi*a/lam*R_func(0)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
      dtermP(a, dtheta, 1, -1), ...
      dtermP(a, dtheta, 1,  1), ... 
      dtermP(a, dtheta, 1,  1), ... 
@@ -203,8 +200,8 @@ h_func_P_I = @(a, r_r, r_sv, dtheta) ... % epsilon can only be zero
 
 % CN0 estimator - only thing using I_p for now
 CN0_dBHz = @(Ip, Qp, Ie, Qe, Il, Ql) ...
-    10 * log10((Ip^2 + Qp^2) / (0.5 * (Ie^2 + Qe^2 + ...
-    Il^2 + Ql^2))); 
+    10 * log10((Ip^2 + Qp^2)^2 / (0.5 * ((Ie^2 + Qe^2)^2 + ...
+    (Il^2 + Ql^2)^2))); 
 
 % low pass filter for after signal accumulation 
 fs = 10e6; % Sampling frequency, for example 10 MHz
@@ -289,6 +286,18 @@ xk = [rk, vk, dtrk, dtrdotk, Ik, Tk, bk, ak]';
 counter = 1;
 Pk_r = [sqrt(P0(1,1))];
 
+% Jacobian and state scaling are performed 
+Dx = ones(size(A));
+Dx(1) = 1/x_hat_LOS(3);
+Dy = 1/num_samples*ones(4,size(xk,1)); % num measurements is hardcoded here! 
+
+% adjust dynamic models (measurement models are adjusted in the loop)  
+B = Dx^-1*B;
+A = Dx^-1*A*Dx;
+Pk = Dx^-1*Pk*(Dx^-1)';
+Q = Dx^-1*Q*(Dx^-1)';
+
+
 N = 1000; % Number of points
 data = zeros(1, N); % Storage for sequence
 cn0_list = [];
@@ -339,12 +348,14 @@ for i = 1:1000 % each i is 1 ms
     Q_P_filt = sum(Q_P_bp);
     
     % concatenate into measurement 
+    % TODO - is the still fair since I'm scaling the jacobian? 
     y_filt   = 1/num_samples * [I_E_filt;Q_E_filt;I_L_filt;Q_L_filt];
 
     % estimate measurement noise
-    CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt) - 3;
+    CN0dBHz = CN0_dBHz(I_P_filt, Q_P_filt, I_E_filt, Q_E_filt, I_L_filt, Q_L_filt);
     CN0 = 10^(CN0dBHz/10); % Carrier to noise density ratio
     R = diag(1/CN0*ones(4,1)); % Variance of measurement noise on 4 measurements 
+    R = (inv(Dy))'*R*(inv(Dy)); % scaling the jacobian requires this 
     cn0_list = [cn0_list, CN0dBHz];
 
     % build linearized observation matrix for Kalman filter
@@ -360,7 +371,7 @@ for i = 1:1000 % each i is 1 ms
 
     % concatenate into observation matrix 
     h_star_tmp = [h_I_E;h_Q_E;h_I_L;h_Q_L];
-    %hx_star = h_star_tmp * [rk, dtrk, Ik, Tk, a]';
+    h_star_tmp = Dy^-1*h_star_tmp*Dx; % scale jacobian 
     hx_star = h_star_tmp * [xk(1), xk(3), xk(5), xk(6), xk(8)]';
     % measurement does not consist of v_r, dtrdot, or b
     % add zeros to accomodate this
@@ -377,9 +388,7 @@ for i = 1:1000 % each i is 1 ms
     y_nom    = [ynom_I_E;ynom_Q_E;ynom_I_L;ynom_Q_L];
 
     % form adjusted measurement 
-    y_star = y_filt - y_nom + hx_star;
-
-    dr_tmp = -1*(sv_pos_LOS(3) - rk)/norm([sv_pos_LOS(1), sv_pos_LOS(2), sv_pos_LOS(3)]- [x_hat_LOS(1), x_hat_LOS(2), rk]);
+    y_star = Dy^-1*(y_filt - y_nom) + hx_star; % jacobian scaling changes measurement 
 
     % run measurement update
     K = Pk * h_star' * inv(h_star * Pk * h_star' + R);
@@ -423,7 +432,7 @@ kernel = 1/2*ones(1,2);
 smoothedData = conv(data_plt, kernel, 'same');
 
 
-plot(smoothedData)
+plot(smoothedData(1:end-1))
 xlabel('time [ms]', 'Interpreter', 'latex', 'FontSize', 16);
 ylabel('$\hat{\sigma_{r_r}}$ [m]', 'Interpreter', 'latex', 'FontSize', 16);
 title('Range Covariance vs. time', 'Interpreter', 'latex');
