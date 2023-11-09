@@ -29,12 +29,12 @@ codePhaseStep = codeFreq / settings.samplingFreq;
 
 %% build priors 
 % initials for position and signal quality
-c = 2.99792458e8;             % speed of light in m/s
-L1 = 1575.42e6;               % L1 carrier frequency
+c = settings.c;               % speed of light in m/s
+L1 = settings.carrier_freq;   % signal carrier frequency
 lam = c/L1;                   % carrier wavelength
-Tc = 1/1.023e6;               % chip duration
+Tc = settings.codeFreqBasis;  % chip duration
 Ts = settings.samplingFreq/2; % Hz sample rate
-Tacc = 1e-3;                  % accumulation period (seconds) 
+Tacc = settings.Tacc;         % accumulation period (seconds) 
 f_IF = settings.IF;           % intermediate frequency (Hz)
 num_samples = .5*settings.samplingFreq*1e-3;
 
@@ -55,21 +55,6 @@ dtsv = priors_1.dtsv(channel_to_track);
 PdBHz = -130;      % Signal power dB/Hz
 P = 10^(PdBHz/10); % convert to V? 
 sig_P = 50;      % V?  
-
-
-% Iono and tropo
-tau_I = 30*60;    % About a 30-minute time constant
-tau_T = 2*3600;   % About a 2-hour time constant
-sig_I = 2;        % Should be about between 1-5 meters
-sig_T = .5*sig_I; % Should be roughly 1/2 of Iono
-
-% Accelerometer with bias
-sig_a = 57e-6; % SD accelerometer noise m/s^1.5
-sig_b = 14e-6; % Continuous SD of accelerometer bias RW noise
-tau_b = 3600;  % Time constant of accelerometer bias RW
-
-% Clock TXCO
-sig_d = 5e-10 * sqrt(Ts); % Discrete clock drift noise variance
 
 % convert ECEF pos to LOS basis 
 R_EB = LOSRotationMatrix(x_hat(1:3), priors_1.satpos(:,channel_to_track))';
@@ -129,78 +114,10 @@ g_adj = R_EB*g_ECEF;
 g_adj = g_adj(3); % grabbing part along LOS
 
 %% measurement models 
-% get spreading code for specified sample rate, PRN, and time of travel
-% using get_x(rem_tot, PRN, Ts)
-% x comes from get_x function
-% isCosine allows for making I and Q replicas from 1 function 
-gen_local_replica = @(x, range, I, T, dtr, dtsv, f_IF, isCosine) ...
-    x .* (isCosine .* cos(2*pi/lam * (range - I + T + c*(dtr - dtsv) + lam*f_IF*Tacc)) + ...
-    (1-isCosine) .* sin(2*pi/lam * (range - I + T + c*(dtr - dtsv) + lam*f_IF*Tacc)));
-
-% Define R(epsilon) 
-%samples_per_chip = .5*settings.samplingFreq*1/settings.codeFreqBasis; 
-% R_func = @(epsilon) (abs(epsilon) < Tc) * settings.codeLength * ...
-%                         .5*settings.samplingFreq/settings.codeFreqBasis * (1 - abs(epsilon)/Tc);
-R_func = @(epsilon) (abs(epsilon) < Tc) * ...
-                         (1 - abs(epsilon)/Tc);
-
-
-% Define R'(epsilon)
-% samples per chip is calculated as
-% sample_rate/(sample_rate/chip_frequency) = (sample/s) / (chips/s) =
-% chip_frequency
-R_prime_func = @(epsilon) (epsilon < 0) .* 1/settings.codeFreqBasis + ...
-                          (epsilon > 0) .* -1/settings.codeFreqBasis;
-
-% define function for nominal signal measurement 
-gen_nominal_signal = @(a, epsilon, dtheta, isCosine) ...
-    a * R_func(epsilon) .* (isCosine .* cos(dtheta) + ...
-    (1-isCosine) .* sin(dtheta));
-
-% shorthand for the derivative of of the function args wrt r_r
-dr = @(r_term, sv_term, r_r, r_sv)...
-     -1*(sv_term - r_term)/norm(r_sv-r_r);
-
-% shorthand for the derivative of funtion wrt I, T, dtr 
-dterm = @(a, epsilon, dtheta, isCosine,It) ...
-         a/c*R_prime_func(epsilon)*(isCosine*cos(dtheta)+(1-isCosine)*(sin(dtheta))) ...
-            + It*2*pi*a/lam*R_func(epsilon)*(isCosine*sin(dtheta)+(1-isCosine)*(cos(dtheta)));
-
-dtermP = @(a, dtheta, isCosine,It) ...
-      It*2*pi*a/lam*R_func(0)*(isCosine*sin(dtheta)+(1-isCosine)*(cos(dtheta)));
-
-% here we are trying to enforce 1D, body frame movement along r_los 
-% this means dr_r2,r3 are zero, but a nominal range must be provided 
-% in the rotation matrix, r_r3 is along the los 
-% state vector order is [r_r, dtr, I, T, a];
-h_func_I = @(a, epsilon, r_r, r_sv, dtheta) ...
-    [a/c * R_prime_func(epsilon) * ...
-        dr(r_r(3), r_sv(3), r_r, r_sv)*cos(dtheta) ...
-            - 2*pi*a*R_func(epsilon)*sin(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
-     dterm(a, epsilon, dtheta, 1, -1), ...
-     dterm(a, epsilon, dtheta, 1,  1), ... 
-     dterm(a, epsilon, dtheta, 1,  1), ... 
-     R_func(epsilon)*cos(dtheta)];
-
-h_func_Q = @(a, epsilon, r_r, r_sv, dtheta) ...
-    [a/c * R_prime_func(epsilon) * ...
-        dr(r_r(3), r_sv(3), r_r, r_sv)*sin(dtheta) ...
-            + 2*pi*a*R_func(epsilon)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
-     dterm(a, epsilon, dtheta, 0, -1), ...
-     dterm(a, epsilon, dtheta, 0,  1), ... 
-     dterm(a, epsilon, dtheta, 0,  1), ... 
-     R_func(epsilon)*sin(dtheta)];
-
-h_func_P_I = @(a, r_r, r_sv, dtheta) ... % epsilon can only be zero
-    [2*pi*a/lam*R_func(0)*cos(dtheta)*dr(r_r(3), r_sv(3), r_r, r_sv), ...
-     dtermP(a, dtheta, 1, -1), ...
-     dtermP(a, dtheta, 1,  1), ... 
-     dtermP(a, dtheta, 1,  1), ... 
-     R_func(0)*sin(dtheta)];
 
 % CN0 estimator - only thing using I_p for now
 CN0_dBHz = @(Ip, Qp, Ie, Qe, Il, Ql) ...
-    10 * log10((Ip^2 + Qp^2)^2 / (0.5 * ((Ie^2 + Qe^2)^2 + ...
+    10 * log10((Ip^2 + Qp^2)^2 / (0.5 * ((Ie ^2 + Qe^2)^2 + ...
     (Il^2 + Ql^2)^2))); 
 
 % low pass filter for after signal accumulation 
@@ -214,71 +131,18 @@ atten_stopband = 60; % Attenuation in the stopband in dB
 % Design a low-pass FIR filter
 lp_filter = designfilt('lowpassfir', 'PassbandFrequency', fpass, ...
                        'StopbandFrequency', fstop, 'StopbandAttenuation', atten_stopband, ...
-                       'SampleRate', fs, 'DesignMethod', 'kaiserwin');
-
-
-%% dynamic models 
-% take state vector r_r, v_r, dtr, dtrdot, I, T, b, P
-% r_{k} = r_{k-1} + (v_{k-1} + (r_dot_nominal_{k-1} - v_nominal_{k-1}))*Ts
-% v_{k} = v_{k-1} + (-1*b + (v_dot_nominal_{k-1}-g_adj) - normrnd(0, sig_a))*Ts
-% dtr_{k} = dtr_{k-1} + Ts*dtr_dot_{k-1} + 0.5*normrnd(0, sig_d)*Ts^2
-% dtr_dot_{k} = dtr_dot_{k-1} + normrnd(0, sig_d)
-% I_{k} = I_{k-1} + (-1/tau_I * I_{k} + normrnd(0, sig_I))*Ts
-% T_{k} = T_{k-1} + (-1/tau_T * T_{k} + normrnd(0, sig_T))*Ts
-% b_{k} = b_{k-1} + (-1/tau_b * b_{k-1} + normrnd(0, sig_b))*Ts
-% P_{k} = P_{k-1} + normrnd(0, sig_P)*Ts
-
-% Assuming values for Ts, tau_I, tau_T, tau_b, and g_adj are provided:
-dt = 1e-3; % time between integration periods 
-A = [1, dt, 0,  0,       0,        0,            0,    0;
-     0,  1, 0,  0,       0,        0,          -dt,    0;
-     0,  0, 1, dt,       0,        0,            0,    0;
-     0,  0, 0,  1,       0,        0,            0,    0;
-     0,  0, 0,  0,   1-dt/tau_I,   0,            0,    0;
-     0,  0, 0,  0,       0,     1-dt/tau_T,      0,    0;
-     0,  0, 0,  0,       0,        0,      1-dt/tau_b, 0;
-     0,  0, 0,  0,       0,        0,            0,    1];
-
-% control inputs are r_dot_nominal, v_nominal, v_dot_nominal, and gadj 
-B = [dt, -dt,  0,   0;
-      0,   0, dt, -dt;
-      0,   0,  0,   0;
-      0,   0,  0,   0;
-      0,   0,  0,   0;
-      0,   0,  0,   0;
-      0,   0,  0,   0;
-      0,   0,  0,   0];
-
-G = diag([-dt, 0.5*dt^2, 1, dt, dt, dt, dt]);
-[~,m] = size(G);
-G = vertcat(zeros(1,m),G);
-W = diag([sig_a^2, sig_d^2, sig_d^2, sig_I^2, sig_T^2, sig_b^2, sig_P^2]);
-Q = G * W * G';
+                       'SampleRate', fs, 'DesignMethod', 'kaiserwin'); 
 
 %% Tracking loop
 
-% get navbits 
-nb = double(extra_out.extra_nb{1,channel_to_track});
-nb(nb == 0) = -1; % encode NB into 1s and -1s
-sim_time = 30; % simulation time (s)
+% TODO reconsider how to grab data 
 
-% get first block of raw data
-%blksize = ceil((settings.codeLength-remCodePhase) / codePhaseStep);
-blksize = settings.samplingFreq * 1e-3; % grab 1 ms of data 
-[rawSignal, samplesRead] = fread(fid, ...
-    dataAdaptCoeff*blksize, settings.dataType);
 
 % grab I and Q components 
 rawSignal = rawSignal';
 rawSignal1=rawSignal(1:2:end);
 rawSignal2=rawSignal(2:2:end);
 rawSignal = rawSignal1 + 1i .* rawSignal2;  %transpose vector
-
-% raw signal w/o navbit
-% repeat for each measurement epoch. Next batch will get a new navbit that
-% will be applicable for 20 code periods.
-nb_now = nb(2);
-rawSignal = nb_now*rawSignal;
 
 % set initial covariance and states
 Pk = P0;
